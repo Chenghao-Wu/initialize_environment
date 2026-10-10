@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT="${1:?Usage: research PROJECT}"
+
+if [[ ! "$PROJECT" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    echo "Invalid project name"
+    exit 1
+fi
+
+DIR="$HOME/research/$PROJECT"
+mkdir -p "$DIR"
+
+exec tmux new-session \
+    -A \
+    -s "$PROJECT" \
+    -c "$DIR"
