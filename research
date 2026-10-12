@@ -1,15 +1,78 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT="${1:?Usage: research PROJECT}"
+ROOT="$HOME/research"
 
-if [[ ! "$PROJECT" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+usage() {
+    echo "Usage: research PROJECT    open (or reattach to) the session for PROJECT"
+    echo "       research list       show all research sessions"
+}
+
+# One "NAME<TAB>STATE" line per project, from both the directories under
+# $ROOT and the tmux sessions started there. Names that differ only in case
+# are the same project and appear once; a live session wins over a bare dir.
+projects() {
+    {
+        for d in "$ROOT"/*/; do
+            [[ -d "$d" ]] || continue
+            d="${d%/}"
+            printf '%s\tnone\n' "${d##*/}"
+        done
+        { tmux list-sessions -F '#{session_name}	#{session_path}	#{?session_attached,attached,detached}' 2>/dev/null || true; } |
+            while IFS=$'\t' read -r name path state; do
+                if [[ "$path" == "$ROOT/$name" ]]; then
+                    printf '%s\t%s\n' "$name" "$state"
+                fi
+            done
+    } | awk -F'\t' '
+        { k = tolower($1) }
+        !(k in state) || state[k] == "none" { name[k] = $1; state[k] = $2 }
+        END { for (k in state) printf "%s\t%s\n", name[k], state[k] }
+    ' | sort -f
+}
+
+list() {
+    local all
+    all=$(projects)
+    if [[ -z "$all" ]]; then
+        echo "No research sessions in $ROOT"
+        return
+    fi
+    printf '%-24s %s\n' PROJECT SESSION
+    while IFS=$'\t' read -r name state; do
+        printf '%-24s %s\n' "$name" "$state"
+    done <<< "$all"
+}
+
+case "${1:-}" in
+    list) list; exit ;;
+    -h|--help) usage; exit ;;
+    "") usage >&2; exit 1 ;;
+esac
+
+# No dots: tmux turns "." into "_" in session names, and "." / ".." would
+# escape $ROOT. No leading dash, so a mistyped flag doesn't become a project.
+if [[ ! "$1" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_-]*$ ]]; then
     echo "Invalid project name"
     exit 1
 fi
 
-DIR="$HOME/research/$PROJECT"
+# Reuse an existing project whose name differs only in case, so "Foo" and
+# "foo" never become two sessions.
+PROJECT=$(projects | awk -F'\t' -v want="$1" '
+    !found && tolower($1) == tolower(want) { print $1; found = 1 }
+')
+PROJECT="${PROJECT:-$1}"
+
+DIR="$ROOT/$PROJECT"
 mkdir -p "$DIR"
+
+# Inside tmux, switch to the session rather than nesting a new one.
+if [[ -n "${TMUX:-}" ]]; then
+    tmux has-session -t "=$PROJECT" 2>/dev/null ||
+        tmux new-session -d -s "$PROJECT" -c "$DIR"
+    exec tmux switch-client -t "=$PROJECT"
+fi
 
 exec tmux new-session \
     -A \
