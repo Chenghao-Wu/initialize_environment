@@ -4,8 +4,9 @@ set -euo pipefail
 ROOT="$HOME/research"
 
 usage() {
-    echo "Usage: research PROJECT    open (or reattach to) the session for PROJECT"
-    echo "       research list       show all research sessions"
+    echo "Usage: research PROJECT           open (or reattach to) the session for PROJECT"
+    echo "       research list              show all research sessions"
+    echo "       research remove PROJECT    kill the session (and its directory, if empty)"
 }
 
 # One "NAME<TAB>STATE" line per project, from both the directories under
@@ -31,6 +32,13 @@ projects() {
     ' | sort -f
 }
 
+# The "NAME<TAB>STATE" line of the existing project matching $1, ignoring case.
+find_project() {
+    projects | awk -F'\t' -v want="$1" '
+        !found && tolower($1) == tolower(want) { print; found = 1 }
+    '
+}
+
 list() {
     local all
     all=$(projects)
@@ -44,8 +52,39 @@ list() {
     done <<< "$all"
 }
 
+remove() {
+    local match name state dir
+    match=$(find_project "$1")
+    if [[ -z "$match" ]]; then
+        echo "No such project: $1" >&2
+        exit 1
+    fi
+    IFS=$'\t' read -r name state <<< "$match"
+    dir="$ROOT/$name"
+
+    # Project files are never deleted; only an empty directory goes.
+    if [[ -d "$dir" ]]; then
+        if rmdir "$dir" 2>/dev/null; then
+            echo "Removed empty directory $dir"
+        else
+            echo "Kept $dir (not empty)"
+        fi
+    fi
+
+    # Last, since this may be the session we are running in.
+    if [[ "$state" != none ]]; then
+        echo "Removed session $name"
+        tmux kill-session -t "=$name"
+    fi
+}
+
 case "${1:-}" in
     list) list; exit ;;
+    remove)
+        [[ -n "${2:-}" ]] || { usage >&2; exit 1; }
+        remove "$2"
+        exit
+        ;;
     -h|--help) usage; exit ;;
     "") usage >&2; exit 1 ;;
 esac
@@ -59,9 +98,7 @@ fi
 
 # Reuse an existing project whose name differs only in case, so "Foo" and
 # "foo" never become two sessions.
-PROJECT=$(projects | awk -F'\t' -v want="$1" '
-    !found && tolower($1) == tolower(want) { print $1; found = 1 }
-')
+PROJECT=$(find_project "$1" | cut -f1)
 PROJECT="${PROJECT:-$1}"
 
 DIR="$ROOT/$PROJECT"
