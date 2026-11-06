@@ -5,23 +5,38 @@ ROOT="$HOME/research"
 
 usage() {
     echo "Usage: research PROJECT           open (or reattach to) the session for PROJECT"
+    echo "       research DIR/PROJECT       same, but keep PROJECT's directory in DIR"
     echo "       research list              show all research sessions"
     echo "       research remove PROJECT    kill the session (and its directory, if empty)"
+}
+
+# Where PROJECT's files live: $ROOT/PROJECT itself, or, for a project created
+# elsewhere with "research DIR/PROJECT", the directory that $ROOT/PROJECT
+# links to.
+location() {
+    local dir="$ROOT/$1" target
+    if [[ -L "$dir" ]]; then
+        target=$(readlink "$dir")
+        [[ "$target" == /* ]] || target="$ROOT/$target"
+        echo "$target"
+    else
+        echo "$dir"
+    fi
 }
 
 # One "NAME<TAB>STATE" line per project, from both the directories under
 # $ROOT and the tmux sessions started there. Names that differ only in case
 # are the same project and appear once; a live session wins over a bare dir.
+# A link whose directory is missing (its drive unmounted, say) still counts.
 projects() {
     {
-        for d in "$ROOT"/*/; do
-            [[ -d "$d" ]] || continue
-            d="${d%/}"
+        for d in "$ROOT"/*; do
+            [[ -d "$d" || ( -L "$d" && ! -e "$d" ) ]] || continue
             printf '%s\tnone\n' "${d##*/}"
         done
         { tmux list-sessions -F '#{session_name}	#{session_path}	#{?session_attached,attached,detached}' 2>/dev/null || true; } |
             while IFS=$'\t' read -r name path state; do
-                if [[ "$path" == "$ROOT/$name" ]]; then
+                if [[ "$path" == "$(location "$name")" ]]; then
                     printf '%s\t%s\n' "$name" "$state"
                 fi
             done
@@ -40,15 +55,18 @@ find_project() {
 }
 
 list() {
-    local all
+    local all dir
     all=$(projects)
     if [[ -z "$all" ]]; then
         echo "No research sessions in $ROOT"
         return
     fi
-    printf '%-24s %s\n' PROJECT SESSION
+    printf '%-24s %-9s %s\n' PROJECT SESSION LOCATION
     while IFS=$'\t' read -r name state; do
-        printf '%-24s %s\n' "$name" "$state"
+        dir=$(location "$name")
+        [[ -d "$dir" ]] || dir="$dir (missing)"
+        [[ "$dir" == "$HOME"/* ]] && dir="~${dir#"$HOME"}"
+        printf '%-24s %-9s %s\n' "$name" "$state" "$dir"
     done <<< "$all"
 }
 
@@ -60,15 +78,22 @@ remove() {
         exit 1
     fi
     IFS=$'\t' read -r name state <<< "$match"
-    dir="$ROOT/$name"
+    dir=$(location "$name")
 
-    # Project files are never deleted; only an empty directory goes.
+    # Project files are never deleted; only an empty directory goes, along
+    # with the link to it if it lives outside $ROOT. A link to a missing
+    # directory stays, as its drive may just be unmounted.
     if [[ -d "$dir" ]]; then
         if rmdir "$dir" 2>/dev/null; then
             echo "Removed empty directory $dir"
+            if [[ -L "$ROOT/$name" ]]; then
+                rm "$ROOT/$name"
+            fi
         else
             echo "Kept $dir (not empty)"
         fi
+    elif [[ -L "$ROOT/$name" ]]; then
+        echo "Kept $ROOT/$name ($dir not found)"
     fi
 
     # Last, since this may be the session we are running in.
@@ -89,19 +114,50 @@ case "${1:-}" in
     "") usage >&2; exit 1 ;;
 esac
 
+# An argument with a slash is a path: the project is named after its last
+# part and lives there, in a directory that DIR must already contain.
+NAME=$1
+TARGET=
+if [[ "$1" == */* ]]; then
+    NAME=$(basename "$1")
+    parent=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P) || {
+        echo "No such directory: $(dirname "$1")" >&2
+        exit 1
+    }
+    # A path into $ROOT itself is just the plain project name.
+    [[ "$parent" -ef "$ROOT" ]] || TARGET="$parent/$NAME"
+fi
+
 # No dots: tmux turns "." into "_" in session names, and "." / ".." would
 # escape $ROOT. No leading dash, so a mistyped flag doesn't become a project.
-if [[ ! "$1" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_-]*$ ]]; then
+if [[ ! "$NAME" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_-]*$ ]]; then
     echo "Invalid project name"
     exit 1
 fi
 
 # Reuse an existing project whose name differs only in case, so "Foo" and
 # "foo" never become two sessions.
-PROJECT=$(find_project "$1" | cut -f1)
-PROJECT="${PROJECT:-$1}"
+PROJECT=$(find_project "$NAME" | cut -f1)
+PROJECT="${PROJECT:-$NAME}"
+LINK="$ROOT/$PROJECT"
 
-DIR="$ROOT/$PROJECT"
+# A project kept outside $ROOT is linked from there, so a plain
+# "research PROJECT" finds it again later.
+if [[ -n "$TARGET" ]]; then
+    if [[ ! -e "$LINK" && ! -L "$LINK" ]]; then
+        mkdir -p "$ROOT"
+        ln -s "$TARGET" "$LINK"
+    elif [[ "$(location "$PROJECT")" != "$TARGET" && ! "$LINK" -ef "$TARGET" ]]; then
+        echo "Project $PROJECT already exists at $(location "$PROJECT")" >&2
+        exit 1
+    fi
+elif [[ -L "$LINK" && ! -d "$LINK" ]]; then
+    # Don't quietly start over in $ROOT while the real directory is away.
+    echo "Project $PROJECT lives at $(location "$PROJECT"), which is missing (is its drive mounted?)" >&2
+    exit 1
+fi
+
+DIR=$(location "$PROJECT")
 mkdir -p "$DIR"
 
 # Inside tmux, switch to the session rather than nesting a new one.
